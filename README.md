@@ -17,3 +17,5 @@ Example usage:
 ```
 zip-to-parquet ~/downloads/my_cool_zip.zip ~/my_new_parquet.parquet
 ```
+
+This is a utility for some domain-specific data parsing involving very high numbers of files.

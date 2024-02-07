@@ -13,10 +13,17 @@ use std::{
 };
 use zip::ZipArchive;
 
+/// Convert .zip file to parquet of all files inside
 #[derive(Parser, Debug)]
+#[command(author, version, about)]
 struct Args {
+	/// .zip file input path
 	input: PathBuf,
+	/// .parquet file output path
 	output: PathBuf,
+	/// Do not load or include file bodies in output (significantly reduce size and time!)
+	#[arg(long)]
+	no_body: bool,
 }
 
 const BLOCK_SIZE: usize = 1024 * 1024 * 1024;
@@ -51,7 +58,7 @@ fn main() -> Result<(), anyhow::Error> {
 		),
 		(
 			"body",
-			Arc::new(BinaryArray::from(Vec::<&[u8]>::new())) as ArrayRef,
+			Arc::new(BinaryArray::from(Vec::<Option<&[u8]>>::new())) as ArrayRef,
 		),
 	])?
 	.schema();
@@ -59,7 +66,7 @@ fn main() -> Result<(), anyhow::Error> {
 	let mut writer = ArrowWriter::try_new(output, schema, Some(props))?;
 
 	let mut file_names = Vec::<String>::new();
-	let mut file_contents = Vec::<Vec<u8>>::new();
+	let mut file_contents = Vec::<Option<Vec<u8>>>::new();
 	let mut block_size: usize = 0;
 
 	let bar = ProgressBar::new(input.len() as u64);
@@ -72,9 +79,14 @@ fn main() -> Result<(), anyhow::Error> {
 		}
 		let file_name = file.name().to_string();
 		block_size += file_name.as_bytes().len();
-		let file_body =
-			file.bytes().collect::<Result<Vec<u8>, std::io::Error>>()?;
-		block_size += file_body.len();
+		let file_body = if args.no_body {
+			None
+		} else {
+			let file_body =
+				file.bytes().collect::<Result<Vec<u8>, std::io::Error>>()?;
+			block_size += file_body.len();
+			Some(file_body)
+		};
 
 		file_names.push(file_name);
 		file_contents.push(file_body);
@@ -98,15 +110,15 @@ fn main() -> Result<(), anyhow::Error> {
 fn write_chunk(
 	writer: &mut ArrowWriter<File>,
 	file_names: &mut Vec<String>,
-	file_contents: &mut Vec<Vec<u8>>,
+	file_contents: &mut Vec<Option<Vec<u8>>>,
 ) -> Result<(), anyhow::Error> {
 	let file_names_column =
 		StringArray::from(file_names.drain(0..).collect::<Vec<String>>());
 	let file_contents_column = BinaryArray::from(
 		file_contents
 			.iter()
-			.map(|v| v.as_ref())
-			.collect::<Vec<&[u8]>>(),
+			.map(|v| v.as_ref().map(|v| v.as_ref()))
+			.collect::<Vec<Option<&[u8]>>>(),
 	);
 	let batch = RecordBatch::try_from_iter(vec![
 		("name", Arc::new(file_names_column) as ArrayRef),
