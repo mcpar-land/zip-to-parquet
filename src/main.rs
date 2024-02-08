@@ -1,3 +1,4 @@
+use anyhow::bail;
 use arrow_array::{ArrayRef, BinaryArray, RecordBatch, StringArray};
 use clap::Parser;
 use indicatif::ProgressBar;
@@ -5,7 +6,6 @@ use parquet::{
 	arrow::ArrowWriter, basic::Compression, file::properties::WriterProperties,
 };
 use std::{
-	fs::File,
 	io::Read,
 	path::PathBuf,
 	sync::Arc,
@@ -18,9 +18,14 @@ use zip::ZipArchive;
 #[command(author, version, about)]
 struct Args {
 	/// .zip file input path
-	input: PathBuf,
+	#[arg(long, short)]
+	input: Vec<PathBuf>,
 	/// .parquet file output path
-	output: PathBuf,
+	#[arg(long, short)]
+	output: Option<PathBuf>,
+	/// use stdout for output
+	#[arg(long)]
+	stdout: bool,
 	/// Do not load or include file bodies in output (significantly reduce size and time!)
 	#[arg(long)]
 	no_body: bool,
@@ -31,21 +36,17 @@ const BLOCK_SIZE: usize = 1024 * 1024 * 1024;
 fn main() -> Result<(), anyhow::Error> {
 	let args = Args::parse();
 
-	let instant = Instant::now();
-	let spinny = ProgressBar::new_spinner()
-		.with_message("Reading zip archive central directory...");
-	spinny.enable_steady_tick(Duration::from_millis(500));
-	let input = std::fs::File::open(&args.input)?;
-
-	let mut input = ZipArchive::new(input)?;
-
-	spinny.finish_with_message(format!(
-		"Finished reading zip archive central directory! (took {:?})",
-		instant.elapsed()
-	));
-
-	println!("Creating output...");
-	let output = std::fs::File::create(&args.output)?;
+	eprintln!("Creating output...");
+	let output = match (&args.output, args.stdout) {
+		(Some(output), false) => FileOrStdout::File(std::fs::File::create(output)?),
+		(None, true) => FileOrStdout::Stdout(std::io::stdout()),
+		(Some(_), true) => {
+			bail!("Must provide an output file or --stdout, but not both");
+		}
+		(None, false) => {
+			bail!("Must provide and output file or --stdout");
+		}
+	};
 
 	let props = WriterProperties::builder()
 		.set_compression(Compression::SNAPPY)
@@ -64,6 +65,33 @@ fn main() -> Result<(), anyhow::Error> {
 	.schema();
 
 	let mut writer = ArrowWriter::try_new(output, schema, Some(props))?;
+
+	for path in &args.input {
+		write_from_stream(path, &mut writer, &args)?;
+	}
+
+	writer.close()?;
+
+	Ok(())
+}
+
+fn write_from_stream(
+	path: &PathBuf,
+	writer: &mut ArrowWriter<FileOrStdout>,
+	args: &Args,
+) -> Result<(), anyhow::Error> {
+	eprintln!("Writing from {}...", path.to_string_lossy());
+
+	let instant = Instant::now();
+	let spinny = ProgressBar::new_spinner()
+		.with_message("Reading zip archive central directory...");
+	spinny.enable_steady_tick(Duration::from_millis(500));
+	let file = std::fs::File::open(path)?;
+	let mut input = ZipArchive::new(file)?;
+	spinny.finish_with_message(format!(
+		"Finished reading zip archive central directory! (took {:?})",
+		instant.elapsed()
+	));
 
 	let mut file_names = Vec::<String>::new();
 	let mut file_contents = Vec::<Option<Vec<u8>>>::new();
@@ -93,14 +121,12 @@ fn main() -> Result<(), anyhow::Error> {
 
 		// write to parquet file and start a new chunk when it reaches 512 mb
 		if block_size >= BLOCK_SIZE {
-			write_chunk(&mut writer, &mut file_names, &mut file_contents)?;
+			write_chunk(writer, &mut file_names, &mut file_contents)?;
 		}
 	}
 
 	// write the last chunk which might be smaller than 512 mb
-	write_chunk(&mut writer, &mut file_names, &mut file_contents)?;
-
-	writer.close()?;
+	write_chunk(writer, &mut file_names, &mut file_contents)?;
 
 	bar.finish();
 
@@ -108,7 +134,7 @@ fn main() -> Result<(), anyhow::Error> {
 }
 
 fn write_chunk(
-	writer: &mut ArrowWriter<File>,
+	writer: &mut ArrowWriter<FileOrStdout>,
 	file_names: &mut Vec<String>,
 	file_contents: &mut Vec<Option<Vec<u8>>>,
 ) -> Result<(), anyhow::Error> {
@@ -129,4 +155,25 @@ fn write_chunk(
 	file_names.clear();
 	file_contents.clear();
 	Ok(())
+}
+
+enum FileOrStdout {
+	Stdout(std::io::Stdout),
+	File(std::fs::File),
+}
+
+impl std::io::Write for FileOrStdout {
+	fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+		match self {
+			FileOrStdout::Stdout(stdout) => stdout.write(buf),
+			FileOrStdout::File(file) => file.write(buf),
+		}
+	}
+
+	fn flush(&mut self) -> std::io::Result<()> {
+		match self {
+			FileOrStdout::Stdout(stdout) => stdout.flush(),
+			FileOrStdout::File(file) => file.flush(),
+		}
+	}
 }

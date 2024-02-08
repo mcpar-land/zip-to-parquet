@@ -7,15 +7,24 @@ A really simple command line utility. Takes a `.zip` file and turns it into a pa
 
 Uses 1024MB blocks, and Snappy compression.
 
-Takes two command line arguments:
+```
+Convert .zip file to parquet of all files inside
 
-- path to the `.zip` file to read
-- path to the `.parquet` file to write to / create
+Usage: zip-to-parquet [OPTIONS]
+
+Options:
+  -i, --input <INPUT>    .zip file input path
+  -o, --output <OUTPUT>  .parquet file output path
+      --stdout           use stdout for output
+      --no-body          Do not load or include file bodies in output (significantly reduce size and time!)
+  -h, --help             Print help
+  -V, --version          Print version
+```
 
 Example usage:
 
 ```
-zip-to-parquet ~/downloads/my_cool_zip.zip ~/my_new_parquet.parquet
+zip-to-parquet -i ~/downloads/my_cool_zip.zip -i ~/downloads/my_other_cool_zip.zip -o ~/my_new_parquet.parquet
 ```
 
 This is a utility for some domain-specific data parsing involving very high numbers of files.
