@@ -1,7 +1,7 @@
 use anyhow::bail;
 use arrow_array::{ArrayRef, BinaryArray, RecordBatch, StringArray};
 use clap::Parser;
-use indicatif::ProgressBar;
+use indicatif::{ProgressBar, ProgressStyle};
 use parquet::{
 	arrow::ArrowWriter, basic::Compression, file::properties::WriterProperties,
 };
@@ -101,6 +101,8 @@ fn write_from_stream(
 	let mut block_size: usize = 0;
 
 	let bar = ProgressBar::new(input.len() as u64);
+
+	bar.set_style(ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{wide_bar}] {pos}/{len} ({per_sec} {eta})").unwrap().progress_chars("=>-"));
 
 	for i in 0..input.len() {
 		bar.inc(1);
