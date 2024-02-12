@@ -153,8 +153,8 @@ fn write_chunk(
 	])?;
 	writer.write(&batch)?;
 	writer.flush()?;
-	file_names.clear();
-	file_contents.clear();
+	*file_names = Vec::new();
+	*file_contents = Vec::new();
 	Ok(())
 }
 
