@@ -122,6 +122,7 @@ fn write_from_stream(
 		// write to parquet file and start a new chunk when it reaches 512 mb
 		if block_size >= BLOCK_SIZE {
 			write_chunk(writer, &mut file_names, &mut file_contents)?;
+			block_size = 0;
 		}
 	}
 
@@ -154,6 +155,7 @@ fn write_chunk(
 	writer.flush()?;
 	file_names.clear();
 	file_contents.clear();
+	println!("bing bong wrote a chunk");
 	Ok(())
 }
 
