@@ -157,7 +157,7 @@ fn write_chunk(
 	])?;
 	writer.write(&batch)?;
 	writer.flush()?;
-	println!("Wrote chunk with {} items", n_items);
+	// println!("Wrote chunk with {} items", n_items);
 	file_names.clear();
 	file_names.shrink_to(0);
 	file_contents.clear();
