@@ -155,7 +155,6 @@ fn write_chunk(
 	writer.flush()?;
 	file_names.clear();
 	file_contents.clear();
-	println!("bing bong wrote a chunk");
 	Ok(())
 }
 
