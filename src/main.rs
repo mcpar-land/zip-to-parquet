@@ -6,7 +6,7 @@ use parquet::{
 	arrow::ArrowWriter, basic::Compression, file::properties::WriterProperties,
 };
 use std::{
-	io::Read,
+	io::{BufReader, BufWriter, Read},
 	path::PathBuf,
 	sync::Arc,
 	time::{Duration, Instant},
@@ -31,15 +31,17 @@ struct Args {
 	no_body: bool,
 }
 
-const BLOCK_SIZE: usize = 1024 * 1024 * 1024;
+const BLOCK_SIZE: usize = 512 * 1024 * 1024;
 
 fn main() -> Result<(), anyhow::Error> {
 	let args = Args::parse();
 
 	eprintln!("Creating output...");
 	let output = match (&args.output, args.stdout) {
-		(Some(output), false) => FileOrStdout::File(std::fs::File::create(output)?),
-		(None, true) => FileOrStdout::Stdout(std::io::stdout()),
+		(Some(output), false) => {
+			FileOrStdout::File(BufWriter::new(std::fs::File::create(output)?))
+		}
+		(None, true) => FileOrStdout::Stdout(BufWriter::new(std::io::stdout())),
 		(Some(_), true) => {
 			bail!("Must provide an output file or --stdout, but not both");
 		}
@@ -86,7 +88,8 @@ fn write_from_stream(
 	let spinny = ProgressBar::new_spinner()
 		.with_message("Reading zip archive central directory...");
 	spinny.enable_steady_tick(Duration::from_millis(500));
-	let file = std::fs::File::open(path)?;
+	// Use a BufReader to read from a file that's larger than memory.
+	let file = BufReader::new(std::fs::File::open(path)?);
 	let mut input = ZipArchive::new(file)?;
 	spinny.finish_with_message(format!(
 		"Finished reading zip archive central directory! (took {:?})",
@@ -139,6 +142,7 @@ fn write_chunk(
 	file_names: &mut Vec<String>,
 	file_contents: &mut Vec<Option<Vec<u8>>>,
 ) -> Result<(), anyhow::Error> {
+	let n_items = file_names.len();
 	let file_names_column =
 		StringArray::from(file_names.drain(0..).collect::<Vec<String>>());
 	let file_contents_column = BinaryArray::from(
@@ -153,22 +157,27 @@ fn write_chunk(
 	])?;
 	writer.write(&batch)?;
 	writer.flush()?;
-	*file_names = Vec::new();
-	*file_contents = Vec::new();
+	println!("Wrote chunk with {} items", n_items);
+	file_names.clear();
+	file_names.shrink_to(0);
+	file_contents.clear();
+	file_contents.shrink_to(0);
 	Ok(())
 }
 
+// Use BufWriters to handle writing to files larger than memory.
 enum FileOrStdout {
-	Stdout(std::io::Stdout),
-	File(std::fs::File),
+	Stdout(BufWriter<std::io::Stdout>),
+	File(BufWriter<std::fs::File>),
 }
 
 impl std::io::Write for FileOrStdout {
 	fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
 		match self {
-			FileOrStdout::Stdout(stdout) => stdout.write(buf),
-			FileOrStdout::File(file) => file.write(buf),
+			FileOrStdout::Stdout(stdout) => stdout.write_all(buf)?,
+			FileOrStdout::File(file) => file.write_all(buf)?,
 		}
+		Ok(buf.len())
 	}
 
 	fn flush(&mut self) -> std::io::Result<()> {
