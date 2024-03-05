@@ -11,6 +11,7 @@ use std::{
 	sync::Arc,
 	time::{Duration, Instant},
 };
+use wax::{Glob, Pattern};
 use zip::ZipArchive;
 
 /// Convert .zip file to parquet of all files inside
@@ -26,9 +27,12 @@ struct Args {
 	/// use stdout for output
 	#[arg(long)]
 	stdout: bool,
-	/// Do not load or include file bodies in output (significantly reduce size and time!)
+	/// do not load or include file bodies in output (significantly reduce size and time!)
 	#[arg(long)]
 	no_body: bool,
+	/// filter files by glob (example: "**/*.png")
+	#[arg(long, short)]
+	glob: Option<String>,
 }
 
 const BLOCK_SIZE: usize = 512 * 1024 * 1024;
@@ -36,7 +40,12 @@ const BLOCK_SIZE: usize = 512 * 1024 * 1024;
 fn main() -> Result<(), anyhow::Error> {
 	let args = Args::parse();
 
-	eprintln!("Creating output...");
+	if let Some(glob) = &args.glob {
+		if let Err(err) = Glob::new(glob) {
+			bail!("Invalid glob \"{}\": {}", glob, err);
+		}
+	}
+
 	let output = match (&args.output, args.stdout) {
 		(Some(output), false) => {
 			FileOrStdout::File(BufWriter::new(std::fs::File::create(output)?))
@@ -49,6 +58,8 @@ fn main() -> Result<(), anyhow::Error> {
 			bail!("Must provide and output file or --stdout");
 		}
 	};
+
+	eprintln!("Creating output...");
 
 	let props = WriterProperties::builder()
 		.set_compression(Compression::SNAPPY)
@@ -84,6 +95,8 @@ fn write_from_stream(
 ) -> Result<(), anyhow::Error> {
 	eprintln!("Writing from {}...", path.to_string_lossy());
 
+	let glob = args.glob.as_ref().map(|glob| Glob::new(&glob).unwrap());
+
 	let instant = Instant::now();
 	let spinny = ProgressBar::new_spinner()
 		.with_message("Reading zip archive central directory...");
@@ -109,6 +122,11 @@ fn write_from_stream(
 		let file = input.by_index(i)?;
 		if file.is_dir() {
 			continue;
+		}
+		if let Some(glob) = &glob {
+			if !glob.is_match(file.name()) {
+				continue;
+			}
 		}
 		let file_name = file.name().to_string();
 		block_size += file_name.as_bytes().len();
@@ -144,7 +162,7 @@ fn write_chunk(
 	file_names: &mut Vec<String>,
 	file_contents: &mut Vec<Option<Vec<u8>>>,
 ) -> Result<(), anyhow::Error> {
-	let n_items = file_names.len();
+	// let n_items = file_names.len();
 	let file_names_column =
 		StringArray::from(file_names.drain(0..).collect::<Vec<String>>());
 	let file_contents_column = BinaryArray::from(

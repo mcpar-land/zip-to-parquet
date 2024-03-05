@@ -1,6 +1,6 @@
 [package]
 name = "zip-to-parquet"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -12,3 +12,4 @@ clap = { version = "4.4.18", features = ["derive"] }
 indicatif = "0.17.7"
 parquet = "50.0.0"
 zip = "0.6.6"
+wax = "0.6.0"
