@@ -18,10 +18,10 @@ use zip::ZipArchive;
 #[derive(Parser, Debug)]
 #[command(author, version, about)]
 struct Args {
-	/// .zip file input path
+	/// .zip file input path (Can be specified multiple times. Can be a glob. example: "**/*.zip")
 	#[arg(long, short)]
-	input: Vec<PathBuf>,
-	/// .parquet file output path
+	input: Vec<String>,
+	/// .parquet file output path (can only be specified once)
 	#[arg(long, short)]
 	output: Option<PathBuf>,
 	/// use stdout for output
@@ -79,7 +79,18 @@ fn main() -> Result<(), anyhow::Error> {
 
 	let mut writer = ArrowWriter::try_new(output, schema, Some(props))?;
 
-	for path in &args.input {
+	let mut all_inputs = Vec::new();
+	for input_glob in &args.input {
+		for entry in glob::glob(input_glob)? {
+			all_inputs.push(entry?);
+		}
+	}
+
+	if all_inputs.len() == 0 {
+		bail!("No files found for glob(s) {:?}", args.input);
+	}
+
+	for path in &all_inputs {
 		write_from_stream(path, &mut writer, &args)?;
 	}
 

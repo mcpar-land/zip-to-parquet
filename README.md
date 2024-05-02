@@ -9,24 +9,9 @@ Uses 1024MB blocks, and Snappy compression.
 
 ## Options
 
-```
-Convert .zip file to parquet of all files inside
-
-Usage: zip-to-parquet.exe [OPTIONS]
-
-Options:
-  -i, --input <INPUT>    .zip file input path
-  -o, --output <OUTPUT>  .parquet file output path
-      --stdout           use stdout for output
-      --no-body          Do not load or include file bodies in output (significantly reduce size and time!)
-  -g, --glob <GLOB>
-  -h, --help             Print help
-  -V, --version          Print version
-```
-
 ### `-i, --input <INPUT>`
 
-Provide a path to a zip file to convert. Can be specified multiple times to include multiple zip files.
+Provide a path to a zip file to convert. Can be specified multiple times to include multiple zip files. Can also include globs.
 
 ### `-o, --output <OUTPUT>`
 
@@ -54,20 +39,7 @@ Prints the help screen.
 
 Prints the version.
 
-```
-Convert .zip file to parquet of all files inside
-
-Usage: zip-to-parquet.exe [OPTIONS]
-
-Options:
-  -i, --input <INPUT>    .zip file input path
-  -o, --output <OUTPUT>  .parquet file output path
-      --stdout           use stdout for output
-      --no-body          do not load or include file bodies in output (significantly reduce size and time!)
-  -g, --glob <GLOB>      filter files by glob (example: "**/*.png")
-  -h, --help             Print help
-  -V, --version          Print version
-```
+---
 
 Example usage:
 
