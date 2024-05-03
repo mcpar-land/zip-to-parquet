@@ -30,6 +30,9 @@ struct Args {
 	/// do not load or include file bodies in output (significantly reduce size and time!)
 	#[arg(long)]
 	no_body: bool,
+	/// do not include zip file source column in output
+	#[arg(long)]
+	no_source: bool,
 	/// filter files by glob (example: "**/*.png")
 	#[arg(long, short)]
 	glob: Option<String>,
@@ -68,6 +71,10 @@ fn main() -> Result<(), anyhow::Error> {
 	let schema = RecordBatch::try_from_iter(vec![
 		(
 			"name",
+			Arc::new(StringArray::from(Vec::<String>::new())) as ArrayRef,
+		),
+		(
+			"source",
 			Arc::new(StringArray::from(Vec::<String>::new())) as ArrayRef,
 		),
 		(
@@ -121,6 +128,7 @@ fn write_from_stream(
 	));
 
 	let mut file_names = Vec::<String>::new();
+	let mut file_sources = Vec::<Option<String>>::new();
 	let mut file_contents = Vec::<Option<Vec<u8>>>::new();
 	let mut block_size: usize = 0;
 
@@ -150,18 +158,35 @@ fn write_from_stream(
 			Some(file_body)
 		};
 
+		let source = if args.no_source {
+			None
+		} else {
+			Some(path.to_string_lossy().to_string())
+		};
+
 		file_names.push(file_name);
+		file_sources.push(source);
 		file_contents.push(file_body);
 
 		// write to parquet file and start a new chunk when it reaches 512 mb
 		if block_size >= BLOCK_SIZE {
-			write_chunk(writer, &mut file_names, &mut file_contents)?;
+			write_chunk(
+				writer,
+				&mut file_names,
+				&mut file_sources,
+				&mut file_contents,
+			)?;
 			block_size = 0;
 		}
 	}
 
 	// write the last chunk which might be smaller than 512 mb
-	write_chunk(writer, &mut file_names, &mut file_contents)?;
+	write_chunk(
+		writer,
+		&mut file_names,
+		&mut file_sources,
+		&mut file_contents,
+	)?;
 
 	bar.finish();
 
@@ -171,11 +196,14 @@ fn write_from_stream(
 fn write_chunk(
 	writer: &mut ArrowWriter<FileOrStdout>,
 	file_names: &mut Vec<String>,
+	file_sources: &mut Vec<Option<String>>,
 	file_contents: &mut Vec<Option<Vec<u8>>>,
 ) -> Result<(), anyhow::Error> {
 	// let n_items = file_names.len();
 	let file_names_column =
 		StringArray::from(file_names.drain(0..).collect::<Vec<String>>());
+	let file_sources_column =
+		StringArray::from(file_sources.drain(0..).collect::<Vec<Option<String>>>());
 	let file_contents_column = BinaryArray::from(
 		file_contents
 			.iter()
@@ -184,6 +212,7 @@ fn write_chunk(
 	);
 	let batch = RecordBatch::try_from_iter(vec![
 		("name", Arc::new(file_names_column) as ArrayRef),
+		("source", Arc::new(file_sources_column) as ArrayRef),
 		("body", Arc::new(file_contents_column) as ArrayRef),
 	])?;
 	writer.write(&batch)?;
@@ -191,6 +220,8 @@ fn write_chunk(
 	// println!("Wrote chunk with {} items", n_items);
 	file_names.clear();
 	file_names.shrink_to(0);
+	file_sources.clear();
+	file_sources.shrink_to(0);
 	file_contents.clear();
 	file_contents.shrink_to(0);
 	Ok(())
