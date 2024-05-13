@@ -8,7 +8,10 @@ use parquet::{
 use std::{
 	io::{BufReader, BufWriter, Read},
 	path::PathBuf,
-	sync::Arc,
+	sync::{
+		atomic::{AtomicBool, Ordering},
+		Arc,
+	},
 	time::{Duration, Instant},
 };
 use wax::{Glob, Pattern};
@@ -43,6 +46,16 @@ const BLOCK_SIZE: usize = 512 * 1024 * 1024;
 fn main() -> Result<(), anyhow::Error> {
 	let args = Args::parse();
 
+	let terminated = Arc::new(AtomicBool::new(false));
+
+	{
+		let terminated = terminated.clone();
+		ctrlc::set_handler(move || {
+			terminated.store(true, std::sync::atomic::Ordering::Relaxed);
+		})
+		.expect("Error setting ctrl+c handler");
+	};
+
 	if let Some(glob) = &args.glob {
 		if let Err(err) = Glob::new(glob) {
 			bail!("Invalid glob \"{}\": {}", glob, err);
@@ -50,9 +63,10 @@ fn main() -> Result<(), anyhow::Error> {
 	}
 
 	let output = match (&args.output, args.stdout) {
-		(Some(output), false) => {
-			FileOrStdout::File(BufWriter::new(std::fs::File::create(output)?))
-		}
+		(Some(output), false) => FileOrStdout::File {
+			buf: BufWriter::new(std::fs::File::create(&output)?),
+			path: output.clone(),
+		},
 		(None, true) => FileOrStdout::Stdout(BufWriter::new(std::io::stdout())),
 		(Some(_), true) => {
 			bail!("Must provide an output file or --stdout, but not both");
@@ -98,7 +112,7 @@ fn main() -> Result<(), anyhow::Error> {
 	}
 
 	for path in &all_inputs {
-		write_from_stream(path, &mut writer, &args)?;
+		writer = write_from_stream(path, writer, &args, &terminated)?;
 	}
 
 	writer.close()?;
@@ -108,9 +122,10 @@ fn main() -> Result<(), anyhow::Error> {
 
 fn write_from_stream(
 	path: &PathBuf,
-	writer: &mut ArrowWriter<FileOrStdout>,
+	mut writer: ArrowWriter<FileOrStdout>,
 	args: &Args,
-) -> Result<(), anyhow::Error> {
+	terminated: &Arc<AtomicBool>,
+) -> Result<ArrowWriter<FileOrStdout>, anyhow::Error> {
 	eprintln!("Writing from {}...", path.to_string_lossy());
 
 	let glob = args.glob.as_ref().map(|glob| Glob::new(&glob).unwrap());
@@ -137,6 +152,7 @@ fn write_from_stream(
 	bar.set_style(ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{wide_bar}] {pos}/{len} ({per_sec} {eta})").unwrap().progress_chars("=>-"));
 
 	for i in 0..input.len() {
+		writer = handle_terminate(terminated, Some(&bar), writer);
 		bar.inc(1);
 		let file = input.by_index(i)?;
 		if file.is_dir() {
@@ -170,35 +186,38 @@ fn write_from_stream(
 
 		// write to parquet file and start a new chunk when it reaches 512 mb
 		if block_size >= BLOCK_SIZE {
-			write_chunk(
+			writer = write_chunk(
 				writer,
 				&mut file_names,
 				&mut file_sources,
 				&mut file_contents,
+				terminated,
 			)?;
 			block_size = 0;
 		}
 	}
 
 	// write the last chunk which might be smaller than 512 mb
-	write_chunk(
+	writer = write_chunk(
 		writer,
 		&mut file_names,
 		&mut file_sources,
 		&mut file_contents,
+		terminated,
 	)?;
 
 	bar.finish();
 
-	Ok(())
+	Ok(writer)
 }
 
 fn write_chunk(
-	writer: &mut ArrowWriter<FileOrStdout>,
+	mut writer: ArrowWriter<FileOrStdout>,
 	file_names: &mut Vec<String>,
 	file_sources: &mut Vec<Option<String>>,
 	file_contents: &mut Vec<Option<Vec<u8>>>,
-) -> Result<(), anyhow::Error> {
+	terminated: &Arc<AtomicBool>,
+) -> Result<ArrowWriter<FileOrStdout>, anyhow::Error> {
 	// let n_items = file_names.len();
 	let file_names_column =
 		StringArray::from(file_names.drain(0..).collect::<Vec<String>>());
@@ -216,7 +235,9 @@ fn write_chunk(
 		("body", Arc::new(file_contents_column) as ArrayRef),
 	])?;
 	writer.write(&batch)?;
+	writer = handle_terminate(terminated, None, writer);
 	writer.flush()?;
+	writer = handle_terminate(terminated, None, writer);
 	// println!("Wrote chunk with {} items", n_items);
 	file_names.clear();
 	file_names.shrink_to(0);
@@ -224,20 +245,23 @@ fn write_chunk(
 	file_sources.shrink_to(0);
 	file_contents.clear();
 	file_contents.shrink_to(0);
-	Ok(())
+	Ok(writer)
 }
 
 // Use BufWriters to handle writing to files larger than memory.
 enum FileOrStdout {
 	Stdout(BufWriter<std::io::Stdout>),
-	File(BufWriter<std::fs::File>),
+	File {
+		path: PathBuf,
+		buf: BufWriter<std::fs::File>,
+	},
 }
 
 impl std::io::Write for FileOrStdout {
 	fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
 		match self {
 			FileOrStdout::Stdout(stdout) => stdout.write_all(buf)?,
-			FileOrStdout::File(file) => file.write_all(buf)?,
+			FileOrStdout::File { buf: file, .. } => file.write_all(buf)?,
 		}
 		Ok(buf.len())
 	}
@@ -245,7 +269,37 @@ impl std::io::Write for FileOrStdout {
 	fn flush(&mut self) -> std::io::Result<()> {
 		match self {
 			FileOrStdout::Stdout(stdout) => stdout.flush(),
-			FileOrStdout::File(file) => file.flush(),
+			FileOrStdout::File { buf: file, .. } => file.flush(),
 		}
 	}
+}
+
+fn handle_terminate(
+	terminated: &Arc<AtomicBool>,
+	progress: Option<&ProgressBar>,
+	handle: ArrowWriter<FileOrStdout>,
+) -> ArrowWriter<FileOrStdout> {
+	if !terminated.load(Ordering::Relaxed) {
+		return handle;
+	}
+	if let Some(progress) = progress {
+		progress.abandon();
+	}
+	eprintln!("Ctrl-c received! Terminating gracefully...");
+	let handle = handle.into_inner().unwrap();
+	let file_path = match &handle {
+		FileOrStdout::Stdout(_) => None,
+		FileOrStdout::File { path, .. } => Some(path.clone()),
+	};
+	std::mem::drop(handle);
+	if let Some(path) = file_path {
+		eprintln!(
+			"Deleting incomplete file {}...",
+			path.as_os_str().to_string_lossy()
+		);
+		std::fs::remove_file(&path)
+			.expect("error when trying to delete incomplete file");
+	}
+
+	std::process::exit(0);
 }
