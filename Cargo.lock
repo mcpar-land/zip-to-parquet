@@ -1549,7 +1549,7 @@ dependencies = [
 
 [[package]]
 name = "zip-to-parquet"
-version = "0.3.0"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "arrow-array",

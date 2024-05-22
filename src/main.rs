@@ -76,8 +76,6 @@ fn main() -> Result<(), anyhow::Error> {
 		}
 	};
 
-	eprintln!("Creating output...");
-
 	let props = WriterProperties::builder()
 		.set_compression(Compression::SNAPPY)
 		.build();
@@ -111,9 +109,18 @@ fn main() -> Result<(), anyhow::Error> {
 		bail!("No files found for glob(s) {:?}", args.input);
 	}
 
+	let bar = ProgressBar::new(0);
+
+	bar.set_style(ProgressStyle::with_template(
+		"{spinner:.green} [{elapsed_precise}] {pos}/{len} [{wide_bar}] ({per_sec} {eta})"
+	).unwrap().progress_chars("█▉▊▋▌▍▎▏  "));
+
 	for path in &all_inputs {
-		writer = write_from_stream(path, writer, &args, &terminated)?;
+		writer = write_from_stream(path, writer, &args, &terminated, &bar)?;
 	}
+
+	bar.finish_and_clear();
+	eprintln!("Done!");
 
 	writer.close()?;
 
@@ -125,20 +132,19 @@ fn write_from_stream(
 	mut writer: ArrowWriter<FileOrStdout>,
 	args: &Args,
 	terminated: &Arc<AtomicBool>,
+	bar: &ProgressBar,
 ) -> Result<ArrowWriter<FileOrStdout>, anyhow::Error> {
-	eprintln!("Writing from {}...", path.to_string_lossy());
+	bar.reset();
 
 	let glob = args.glob.as_ref().map(|glob| Glob::new(&glob).unwrap());
 
 	let instant = Instant::now();
-	let spinny = ProgressBar::new_spinner()
-		.with_message("Reading zip archive central directory...");
-	spinny.enable_steady_tick(Duration::from_millis(500));
+	bar.println(format!("Writing from {}...", path.to_string_lossy()));
 	// Use a BufReader to read from a file that's larger than memory.
 	let file = BufReader::new(std::fs::File::open(path)?);
 	let mut input = ZipArchive::new(file)?;
-	spinny.finish_with_message(format!(
-		"Finished reading zip archive central directory! (took {:?})",
+	bar.println(format!(
+		"Finished reading zip archive central directory (took {:?})",
 		instant.elapsed()
 	));
 
@@ -147,9 +153,7 @@ fn write_from_stream(
 	let mut file_contents = Vec::<Option<Vec<u8>>>::new();
 	let mut block_size: usize = 0;
 
-	let bar = ProgressBar::new(input.len() as u64);
-
-	bar.set_style(ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{wide_bar}] {pos}/{len} ({per_sec} {eta})").unwrap().progress_chars("=>-"));
+	bar.set_length(input.len() as u64);
 
 	for i in 0..input.len() {
 		writer = handle_terminate(terminated, Some(&bar), writer);
@@ -206,7 +210,11 @@ fn write_from_stream(
 		terminated,
 	)?;
 
-	bar.finish();
+	bar.println(format!(
+		"Finished writing {} files (took {:?})",
+		input.len(),
+		bar.elapsed()
+	));
 
 	Ok(writer)
 }
