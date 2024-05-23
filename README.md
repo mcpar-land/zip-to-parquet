@@ -1,6 +1,6 @@
 # `zip-to-parquet`
 
-A really simple command line utility. Takes a `.zip` file and turns it into a `.parquet` file with following columns:
+A really simple command line utility. Takes a `.zip` file / files as input. The output is a `.parquet` file with one row per compressed file found inside the `.zip` file(s). The parquet file has the following columns:
 
 | Column Name | Column Type | Description                               |
 | ----------- | ----------- | ----------------------------------------- |
