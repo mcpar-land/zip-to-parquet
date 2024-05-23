@@ -1,7 +1,7 @@
 use anyhow::bail;
 use arrow_array::{ArrayRef, BinaryArray, RecordBatch, StringArray};
 use clap::Parser;
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use parquet::{
 	arrow::ArrowWriter, basic::Compression, file::properties::WriterProperties,
 };
@@ -12,7 +12,7 @@ use std::{
 		atomic::{AtomicBool, Ordering},
 		Arc,
 	},
-	time::{Duration, Instant},
+	time::Instant,
 };
 use wax::{Glob, Pattern};
 use zip::ZipArchive;
@@ -108,18 +108,44 @@ fn main() -> Result<(), anyhow::Error> {
 	if all_inputs.len() == 0 {
 		bail!("No files found for glob(s) {:?}", args.input);
 	}
+	let progress_chars = "█▉▊▋▌▍▎▏  ";
+	// let progress_chars = "█▓▒░  ";
 
 	let bar = ProgressBar::new(0);
 
 	bar.set_style(ProgressStyle::with_template(
-		"{spinner:.green} [{elapsed_precise}] {pos}/{len} [{wide_bar}] ({per_sec} {eta})"
-	).unwrap().progress_chars("█▉▊▋▌▍▎▏  "));
+		"{spinner:.green} [{elapsed_precise}] [{wide_bar}] {pos}/{len} ({per_sec})"
+	).unwrap().progress_chars(progress_chars));
+
+	let (overall_bar, bar) = if all_inputs.len() == 1 {
+		(None, bar)
+	} else {
+		let mp = MultiProgress::new();
+		let overall_bar = ProgressBar::new(all_inputs.len() as u64);
+		overall_bar.set_style(
+			ProgressStyle::with_template(
+				"{spinner:.green} [{elapsed_precise}] [{wide_bar}] {pos}/{len} ({eta})",
+			)
+			.unwrap()
+			.progress_chars(progress_chars),
+		);
+		let overall_bar = mp.add(overall_bar);
+		overall_bar.set_position(0);
+		let bar = mp.add(bar);
+		(Some(overall_bar), bar)
+	};
 
 	for path in &all_inputs {
 		writer = write_from_stream(path, writer, &args, &terminated, &bar)?;
+		if let Some(overall_bar) = &overall_bar {
+			overall_bar.inc(1);
+		}
 	}
 
 	bar.finish_and_clear();
+	if let Some(overall_bar) = &overall_bar {
+		overall_bar.finish();
+	}
 	eprintln!("Done!");
 
 	writer.close()?;
