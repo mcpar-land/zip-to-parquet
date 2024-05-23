@@ -5,6 +5,7 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use parquet::{
 	arrow::ArrowWriter, basic::Compression, file::properties::WriterProperties,
 };
+use sha2::{Digest, Sha256};
 use std::{
 	io::{BufReader, BufWriter, Read},
 	path::PathBuf,
@@ -36,6 +37,9 @@ struct Args {
 	/// do not include zip file source column in output
 	#[arg(long)]
 	no_source: bool,
+	// do not include the SHA-256 hash column in output
+	#[arg(long)]
+	no_hash: bool,
 	/// filter files by glob (example: "**/*.png")
 	#[arg(long, short)]
 	glob: Option<String>,
@@ -92,6 +96,10 @@ fn main() -> Result<(), anyhow::Error> {
 		(
 			"body",
 			Arc::new(BinaryArray::from(Vec::<Option<&[u8]>>::new())) as ArrayRef,
+		),
+		(
+			"hash",
+			Arc::new(StringArray::from(Vec::<String>::new())) as ArrayRef,
 		),
 	])?
 	.schema();
@@ -177,6 +185,7 @@ fn write_from_stream(
 	let mut file_names = Vec::<String>::new();
 	let mut file_sources = Vec::<Option<String>>::new();
 	let mut file_contents = Vec::<Option<Vec<u8>>>::new();
+	let mut file_hashes = Vec::<Option<String>>::new();
 	let mut block_size: usize = 0;
 
 	bar.set_length(input.len() as u64);
@@ -195,13 +204,26 @@ fn write_from_stream(
 		}
 		let file_name = file.name().to_string();
 		block_size += file_name.as_bytes().len();
-		let file_body = if args.no_body {
-			None
+		let (file_body, file_hash) = if args.no_body && args.no_hash {
+			(None, None)
 		} else {
 			let file_body =
 				file.bytes().collect::<Result<Vec<u8>, std::io::Error>>()?;
-			block_size += file_body.len();
-			Some(file_body)
+			let hash = if args.no_hash {
+				None
+			} else {
+				let mut hasher = Sha256::new();
+				hasher.update(&file_body);
+				let hash = hasher
+					.finalize()
+					.iter()
+					.map(|v| format!("{:x}", v))
+					.collect::<Vec<String>>()
+					.join("");
+				Some(format!("{:x?}", hash))
+			};
+			let body = if args.no_body { None } else { Some(file_body) };
+			(body, hash)
 		};
 
 		let source = if args.no_source {
@@ -213,6 +235,7 @@ fn write_from_stream(
 		file_names.push(file_name);
 		file_sources.push(source);
 		file_contents.push(file_body);
+		file_hashes.push(file_hash);
 
 		// write to parquet file and start a new chunk when it reaches 512 mb
 		if block_size >= BLOCK_SIZE {
@@ -221,6 +244,7 @@ fn write_from_stream(
 				&mut file_names,
 				&mut file_sources,
 				&mut file_contents,
+				&mut file_hashes,
 				terminated,
 			)?;
 			block_size = 0;
@@ -233,6 +257,7 @@ fn write_from_stream(
 		&mut file_names,
 		&mut file_sources,
 		&mut file_contents,
+		&mut file_hashes,
 		terminated,
 	)?;
 
@@ -250,6 +275,7 @@ fn write_chunk(
 	file_names: &mut Vec<String>,
 	file_sources: &mut Vec<Option<String>>,
 	file_contents: &mut Vec<Option<Vec<u8>>>,
+	file_hashes: &mut Vec<Option<String>>,
 	terminated: &Arc<AtomicBool>,
 ) -> Result<ArrowWriter<FileOrStdout>, anyhow::Error> {
 	// let n_items = file_names.len();
@@ -263,10 +289,13 @@ fn write_chunk(
 			.map(|v| v.as_ref().map(|v| v.as_ref()))
 			.collect::<Vec<Option<&[u8]>>>(),
 	);
+	let file_hashes_column =
+		StringArray::from(file_hashes.drain(0..).collect::<Vec<Option<String>>>());
 	let batch = RecordBatch::try_from_iter(vec![
 		("name", Arc::new(file_names_column) as ArrayRef),
 		("source", Arc::new(file_sources_column) as ArrayRef),
 		("body", Arc::new(file_contents_column) as ArrayRef),
+		("hash", Arc::new(file_hashes_column) as ArrayRef),
 	])?;
 	writer.write(&batch)?;
 	writer = handle_terminate(terminated, None, writer);
@@ -279,6 +308,8 @@ fn write_chunk(
 	file_sources.shrink_to(0);
 	file_contents.clear();
 	file_contents.shrink_to(0);
+	file_hashes.clear();
+	file_hashes.shrink_to(0);
 	Ok(writer)
 }
 

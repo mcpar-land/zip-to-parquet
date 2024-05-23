@@ -1,6 +1,6 @@
 [package]
 name = "zip-to-parquet"
-version = "0.3.3"
+version = "0.4.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -15,3 +15,4 @@ zip = "0.6.6"
 wax = "0.6.0"
 glob = "0.3.1"
 ctrlc = "3.4.4"
+sha2 = "0.10.8"
