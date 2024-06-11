@@ -1,6 +1,6 @@
-use anyhow::bail;
 use arrow_array::{ArrayRef, BinaryArray, RecordBatch, StringArray};
 use clap::Parser;
+use error::Error;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use parquet::{
 	arrow::ArrowWriter, basic::Compression, file::properties::WriterProperties,
@@ -17,6 +17,8 @@ use std::{
 };
 use wax::{Glob, Pattern};
 use zip::ZipArchive;
+
+pub mod error;
 
 /// Convert .zip file to parquet of all files inside
 #[derive(Parser, Debug)]
@@ -47,7 +49,14 @@ struct Args {
 
 const BLOCK_SIZE: usize = 512 * 1024 * 1024;
 
-fn main() -> Result<(), anyhow::Error> {
+fn main() {
+	if let Err(err) = run() {
+		eprintln!("{}", err);
+		std::process::exit(1);
+	}
+}
+
+fn run() -> Result<(), Error> {
 	let args = Args::parse();
 
 	let terminated = Arc::new(AtomicBool::new(false));
@@ -61,22 +70,28 @@ fn main() -> Result<(), anyhow::Error> {
 	};
 
 	if let Some(glob) = &args.glob {
-		if let Err(err) = Glob::new(glob) {
-			bail!("Invalid glob \"{}\": {}", glob, err);
-		}
+		Glob::new(glob).map_err(|err| Error::InvalidWaxGlob {
+			err,
+			glob: glob.clone(),
+		})?;
 	}
 
 	let output = match (&args.output, args.stdout) {
 		(Some(output), false) => FileOrStdout::File {
-			buf: BufWriter::new(std::fs::File::create(&output)?),
+			buf: BufWriter::new(std::fs::File::create(&output).map_err(|err| {
+				Error::WriteFile {
+					err,
+					target: output.clone(),
+				}
+			})?),
 			path: output.clone(),
 		},
 		(None, true) => FileOrStdout::Stdout(BufWriter::new(std::io::stdout())),
 		(Some(_), true) => {
-			bail!("Must provide an output file or --stdout, but not both");
+			return Err(Error::InvalidOutputAndStdout);
 		}
 		(None, false) => {
-			bail!("Must provide and output file or --stdout");
+			return Err(Error::NeedsOutputOrStdout);
 		}
 	};
 
@@ -104,17 +119,48 @@ fn main() -> Result<(), anyhow::Error> {
 	])?
 	.schema();
 
-	let mut writer = ArrowWriter::try_new(output, schema, Some(props))?;
+	let writer = ArrowWriter::try_new(output, schema, Some(props))?;
+	match write(&args, writer, &terminated) {
+		Ok(writer) => {
+			writer.close()?;
+			eprintln!("Done!")
+		}
+		Err(err) => {
+			eprintln!("Error: {}", err);
+			if let Some(output) = &args.output {
+				eprintln!(
+					"Deleting incomplete file {} ...",
+					output.as_os_str().to_string_lossy()
+				);
+				std::fs::remove_file(&output)
+					.expect("error when trying to delete incomplete file");
+				std::process::exit(1);
+			}
+		}
+	}
 
+	Ok(())
+}
+
+fn write(
+	args: &Args,
+	mut writer: ArrowWriter<FileOrStdout>,
+	terminated: &Arc<AtomicBool>,
+) -> Result<ArrowWriter<FileOrStdout>, Error> {
 	let mut all_inputs = Vec::new();
 	for input_glob in &args.input {
-		for entry in glob::glob(input_glob)? {
+		for entry in glob::glob(input_glob).map_err(|err| Error::InvalidGlob {
+			glob: input_glob.clone(),
+			err,
+		})? {
 			all_inputs.push(entry?);
 		}
 	}
 
 	if all_inputs.len() == 0 {
-		bail!("No files found for glob(s) {:?}", args.input);
+		return Err(Error::NoInputsFound {
+			globs: args.input.clone(),
+		});
 	}
 	let progress_chars = "█▉▊▋▌▍▎▏  ";
 	// let progress_chars = "█▓▒░  ";
@@ -154,11 +200,7 @@ fn main() -> Result<(), anyhow::Error> {
 	if let Some(overall_bar) = &overall_bar {
 		overall_bar.finish();
 	}
-	eprintln!("Done!");
-
-	writer.close()?;
-
-	Ok(())
+	Ok(writer)
 }
 
 fn write_from_stream(
@@ -167,7 +209,7 @@ fn write_from_stream(
 	args: &Args,
 	terminated: &Arc<AtomicBool>,
 	bar: &ProgressBar,
-) -> Result<ArrowWriter<FileOrStdout>, anyhow::Error> {
+) -> Result<ArrowWriter<FileOrStdout>, Error> {
 	bar.reset();
 
 	let glob = args.glob.as_ref().map(|glob| Glob::new(&glob).unwrap());
@@ -175,8 +217,16 @@ fn write_from_stream(
 	let instant = Instant::now();
 	bar.println(format!("Writing from {}...", path.to_string_lossy()));
 	// Use a BufReader to read from a file that's larger than memory.
-	let file = BufReader::new(std::fs::File::open(path)?);
-	let mut input = ZipArchive::new(file)?;
+	let file = BufReader::new(std::fs::File::open(path).map_err(|err| {
+		Error::ReadFile {
+			err,
+			file: path.clone(),
+		}
+	})?);
+	let mut input = ZipArchive::new(file).map_err(|err| Error::Zip {
+		err,
+		file: path.clone(),
+	})?;
 	bar.println(format!(
 		"Finished reading zip archive central directory (took {:?})",
 		instant.elapsed()
@@ -193,7 +243,10 @@ fn write_from_stream(
 	for i in 0..input.len() {
 		writer = handle_terminate(terminated, Some(&bar), writer);
 		bar.inc(1);
-		let file = input.by_index(i)?;
+		let file = input.by_index(i).map_err(|err| Error::Zip {
+			err,
+			file: path.clone(),
+		})?;
 		if file.is_dir() {
 			continue;
 		}
@@ -207,8 +260,14 @@ fn write_from_stream(
 		let (file_body, file_hash) = if args.no_body && args.no_hash {
 			(None, None)
 		} else {
-			let file_body =
-				file.bytes().collect::<Result<Vec<u8>, std::io::Error>>()?;
+			let file_body = file
+				.bytes()
+				.collect::<Result<Vec<u8>, std::io::Error>>()
+				.map_err(|err| Error::ReadFileInZip {
+					err,
+					file_name: file_name.clone(),
+					file: path.clone(),
+				})?;
 			let hash = if args.no_hash {
 				None
 			} else {
@@ -277,7 +336,7 @@ fn write_chunk(
 	file_contents: &mut Vec<Option<Vec<u8>>>,
 	file_hashes: &mut Vec<Option<String>>,
 	terminated: &Arc<AtomicBool>,
-) -> Result<ArrowWriter<FileOrStdout>, anyhow::Error> {
+) -> Result<ArrowWriter<FileOrStdout>, error::Error> {
 	// let n_items = file_names.len();
 	let file_names_column =
 		StringArray::from(file_names.drain(0..).collect::<Vec<String>>());
