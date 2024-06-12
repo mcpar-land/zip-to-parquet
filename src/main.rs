@@ -1,7 +1,7 @@
 use arrow_array::{ArrayRef, BinaryArray, RecordBatch, StringArray};
 use clap::Parser;
 use error::Error;
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use logger::Logger;
 use parquet::{
 	arrow::ArrowWriter, basic::Compression, file::properties::WriterProperties,
 };
@@ -19,6 +19,7 @@ use wax::{Glob, Pattern};
 use zip::ZipArchive;
 
 pub mod error;
+pub mod logger;
 
 /// Convert .zip file to parquet of all files inside
 #[derive(Parser, Debug)]
@@ -58,6 +59,8 @@ fn main() {
 
 fn run() -> Result<(), Error> {
 	let args = Args::parse();
+
+	let mut logger = Logger::new(args.input.len());
 
 	let terminated = Arc::new(AtomicBool::new(false));
 
@@ -120,7 +123,7 @@ fn run() -> Result<(), Error> {
 	.schema();
 
 	let writer = ArrowWriter::try_new(output, schema, Some(props))?;
-	match write(&args, writer, &terminated) {
+	match write(&args, writer, &terminated, &mut logger) {
 		Ok(writer) => {
 			writer.close()?;
 			eprintln!("Done!")
@@ -146,6 +149,7 @@ fn write(
 	args: &Args,
 	mut writer: ArrowWriter<FileOrStdout>,
 	terminated: &Arc<AtomicBool>,
+	logger: &mut Logger,
 ) -> Result<ArrowWriter<FileOrStdout>, Error> {
 	let mut all_inputs = Vec::new();
 	for input_glob in &args.input {
@@ -162,44 +166,13 @@ fn write(
 			globs: args.input.clone(),
 		});
 	}
-	let progress_chars = "█▉▊▋▌▍▎▏  ";
-	// let progress_chars = "█▓▒░  ";
-
-	let bar = ProgressBar::new(0);
-
-	bar.set_style(ProgressStyle::with_template(
-		"{spinner:.green} [{elapsed_precise}] [{wide_bar}] {pos}/{len} ({per_sec})"
-	).unwrap().progress_chars(progress_chars));
-
-	let (overall_bar, bar) = if all_inputs.len() == 1 {
-		(None, bar)
-	} else {
-		let mp = MultiProgress::new();
-		let overall_bar = ProgressBar::new(all_inputs.len() as u64);
-		overall_bar.set_style(
-			ProgressStyle::with_template(
-				"{spinner:.green} [{elapsed_precise}] [{wide_bar}] {pos}/{len} ({eta})",
-			)
-			.unwrap()
-			.progress_chars(progress_chars),
-		);
-		let overall_bar = mp.add(overall_bar);
-		overall_bar.set_position(0);
-		let bar = mp.add(bar);
-		(Some(overall_bar), bar)
-	};
 
 	for path in &all_inputs {
-		writer = write_from_stream(path, writer, &args, &terminated, &bar)?;
-		if let Some(overall_bar) = &overall_bar {
-			overall_bar.inc(1);
-		}
+		writer = write_from_stream(path, writer, &args, &terminated, logger)?;
 	}
 
-	bar.finish_and_clear();
-	if let Some(overall_bar) = &overall_bar {
-		overall_bar.finish();
-	}
+	logger.finish();
+
 	Ok(writer)
 }
 
@@ -208,14 +181,12 @@ fn write_from_stream(
 	mut writer: ArrowWriter<FileOrStdout>,
 	args: &Args,
 	terminated: &Arc<AtomicBool>,
-	bar: &ProgressBar,
+	logger: &mut Logger,
 ) -> Result<ArrowWriter<FileOrStdout>, Error> {
-	bar.reset();
-
 	let glob = args.glob.as_ref().map(|glob| Glob::new(&glob).unwrap());
 
 	let instant = Instant::now();
-	bar.println(format!("Writing from {}...", path.to_string_lossy()));
+	logger.println(format!("Writing from {}...", path.to_string_lossy()));
 	// Use a BufReader to read from a file that's larger than memory.
 	let file = BufReader::new(std::fs::File::open(path).map_err(|err| {
 		Error::ReadFile {
@@ -227,7 +198,7 @@ fn write_from_stream(
 		err,
 		file: path.clone(),
 	})?;
-	bar.println(format!(
+	logger.println(format!(
 		"Finished reading zip archive central directory (took {:?})",
 		instant.elapsed()
 	));
@@ -238,11 +209,14 @@ fn write_from_stream(
 	let mut file_hashes = Vec::<Option<String>>::new();
 	let mut block_size: usize = 0;
 
-	bar.set_length(input.len() as u64);
+	logger.next_overall(
+		format!("Writing from {}...", path.to_string_lossy()),
+		input.len() as u64,
+	);
 
 	for i in 0..input.len() {
-		writer = handle_terminate(terminated, Some(&bar), writer);
-		bar.inc(1);
+		writer = handle_terminate(terminated, Some(logger), writer);
+		logger.inc(1);
 		let file = input.by_index(i).map_err(|err| Error::Zip {
 			err,
 			file: path.clone(),
@@ -323,12 +297,6 @@ fn write_from_stream(
 		terminated,
 	)?;
 
-	bar.println(format!(
-		"Finished writing {} files (took {:?})",
-		input.len(),
-		bar.elapsed()
-	));
-
 	Ok(writer)
 }
 
@@ -403,7 +371,7 @@ impl std::io::Write for FileOrStdout {
 
 fn handle_terminate(
 	terminated: &Arc<AtomicBool>,
-	progress: Option<&ProgressBar>,
+	progress: Option<&mut Logger>,
 	handle: ArrowWriter<FileOrStdout>,
 ) -> ArrowWriter<FileOrStdout> {
 	if !terminated.load(Ordering::Relaxed) {
