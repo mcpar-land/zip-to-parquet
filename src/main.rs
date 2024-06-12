@@ -47,7 +47,7 @@ struct Args {
 	glob: Option<String>,
 }
 
-const BLOCK_SIZE: usize = 512 * 1024 * 1024;
+const BLOCK_SIZE: usize = 1 * 1024 * 1024;
 
 fn main() {
 	if let Err(err) = run() {
@@ -268,6 +268,7 @@ fn write_from_stream(
 					file_name: file_name.clone(),
 					file: path.clone(),
 				})?;
+			block_size += file_body.len();
 			let hash = if args.no_hash {
 				None
 			} else {
@@ -279,7 +280,9 @@ fn write_from_stream(
 					.map(|v| format!("{:x}", v))
 					.collect::<Vec<String>>()
 					.join("");
-				Some(format!("{:x?}", hash))
+				let hash_str = format!("{:x?}", hash);
+				block_size += hash_str.as_bytes().len();
+				Some(hash_str)
 			};
 			let body = if args.no_body { None } else { Some(file_body) };
 			(body, hash)
