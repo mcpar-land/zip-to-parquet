@@ -5,7 +5,7 @@ use crate::Args;
 
 pub enum Logger {
 	Tty {
-		overall_bar: Option<ProgressBar>,
+		overall_bar: Option<(MultiProgress, ProgressBar)>,
 		current_bar: ProgressBar,
 	},
 	Simple {
@@ -16,8 +16,7 @@ pub enum Logger {
 }
 
 impl Logger {
-	pub fn new(args: &Args) -> Self {
-		let n_sources = args.input.len();
+	pub fn new(args: &Args, n_sources: u64) -> Self {
 		if args.simple || !atty::is(Stream::Stderr) {
 			return Logger::Simple {
 				overall_progress: if n_sources > 1 {
@@ -54,7 +53,7 @@ impl Logger {
 				let overall_bar = mp.add(overall_bar);
 				overall_bar.set_position(0);
 				let bar = mp.add(current_bar);
-				(Some(overall_bar), bar)
+				(Some((mp, overall_bar)), bar)
 			}
 		};
 
@@ -65,15 +64,16 @@ impl Logger {
 	}
 
 	pub fn next_overall(&mut self, label: String, new_current_max: u64) {
-		eprintln!("Starting {}", label);
+		self.println(format!("Starting {}", label));
 		match self {
 			Logger::Tty {
 				overall_bar,
 				current_bar,
 			} => {
-				if let Some(overall_bar) = overall_bar {
+				if let Some((_, overall_bar)) = overall_bar {
 					overall_bar.inc(1);
 				}
+				current_bar.set_length(new_current_max);
 				current_bar.set_position(0);
 			}
 			Logger::Simple {
@@ -114,13 +114,21 @@ impl Logger {
 		}
 	}
 
-	pub fn println<T: AsRef<str>>(&self, msg: T) {
+	pub fn println(&self, msg: String) {
 		match self {
-			Logger::Tty { current_bar, .. } => {
-				current_bar.println(msg);
-			}
+			Logger::Tty {
+				current_bar,
+				overall_bar,
+			} => match overall_bar {
+				Some((mp, _)) => {
+					_ = mp.println(msg);
+				}
+				None => {
+					current_bar.println(msg);
+				}
+			},
 			Logger::Simple { .. } => {
-				eprintln!("{}", msg.as_ref());
+				eprintln!("{}", msg);
 			}
 		}
 	}
@@ -131,7 +139,7 @@ impl Logger {
 				overall_bar,
 				current_bar,
 			} => {
-				if let Some(overall_bar) = overall_bar {
+				if let Some((_, overall_bar)) = overall_bar {
 					overall_bar.abandon();
 				}
 				current_bar.abandon();
@@ -146,7 +154,7 @@ impl Logger {
 				overall_bar,
 				current_bar,
 			} => {
-				if let Some(overall_bar) = overall_bar {
+				if let Some((_, overall_bar)) = overall_bar {
 					overall_bar.finish();
 				}
 				current_bar.finish_and_clear();

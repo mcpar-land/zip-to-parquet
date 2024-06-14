@@ -24,7 +24,7 @@ pub mod logger;
 /// Convert .zip file to parquet of all files inside
 #[derive(Parser, Debug)]
 #[command(author, version, about)]
-struct Args {
+pub struct Args {
 	/// .zip file input path (Can be specified multiple times. Can be a glob. example: "**/*.zip")
 	#[arg(long, short)]
 	input: Vec<String>,
@@ -51,7 +51,7 @@ struct Args {
 	glob: Option<String>,
 }
 
-const BLOCK_SIZE: usize = 1 * 1024 * 1024;
+const BLOCK_SIZE: usize = 512 * 1024 * 1024;
 
 fn main() {
 	if let Err(err) = run() {
@@ -62,8 +62,6 @@ fn main() {
 
 fn run() -> Result<(), Error> {
 	let args = Args::parse();
-
-	let mut logger = Logger::new(&args);
 
 	let terminated = Arc::new(AtomicBool::new(false));
 
@@ -126,7 +124,7 @@ fn run() -> Result<(), Error> {
 	.schema();
 
 	let writer = ArrowWriter::try_new(output, schema, Some(props))?;
-	match write(&args, writer, &terminated, &mut logger) {
+	match write(&args, writer, &terminated) {
 		Ok(writer) => {
 			writer.close()?;
 			eprintln!("Done!")
@@ -152,7 +150,6 @@ fn write(
 	args: &Args,
 	mut writer: ArrowWriter<FileOrStdout>,
 	terminated: &Arc<AtomicBool>,
-	logger: &mut Logger,
 ) -> Result<ArrowWriter<FileOrStdout>, Error> {
 	let mut all_inputs = Vec::new();
 	for input_glob in &args.input {
@@ -170,8 +167,10 @@ fn write(
 		});
 	}
 
+	let mut logger = Logger::new(&args, all_inputs.len() as u64);
+
 	for path in &all_inputs {
-		writer = write_from_stream(path, writer, &args, &terminated, logger)?;
+		writer = write_from_stream(path, writer, &args, &terminated, &mut logger)?;
 	}
 
 	logger.finish();
@@ -268,7 +267,9 @@ fn write_from_stream(
 		let source = if args.no_source {
 			None
 		} else {
-			Some(path.to_string_lossy().to_string())
+			let source = path.to_string_lossy().to_string();
+			block_size += source.as_bytes().len();
+			Some(source)
 		};
 
 		file_names.push(file_name);
@@ -285,6 +286,7 @@ fn write_from_stream(
 				&mut file_contents,
 				&mut file_hashes,
 				terminated,
+				logger,
 			)?;
 			block_size = 0;
 		}
@@ -298,6 +300,7 @@ fn write_from_stream(
 		&mut file_contents,
 		&mut file_hashes,
 		terminated,
+		logger,
 	)?;
 
 	Ok(writer)
@@ -310,8 +313,9 @@ fn write_chunk(
 	file_contents: &mut Vec<Option<Vec<u8>>>,
 	file_hashes: &mut Vec<Option<String>>,
 	terminated: &Arc<AtomicBool>,
+	logger: &mut Logger,
 ) -> Result<ArrowWriter<FileOrStdout>, error::Error> {
-	// let n_items = file_names.len();
+	let n_items = file_names.len();
 	let file_names_column =
 		StringArray::from(file_names.drain(0..).collect::<Vec<String>>());
 	let file_sources_column =
@@ -334,7 +338,7 @@ fn write_chunk(
 	writer = handle_terminate(terminated, None, writer);
 	writer.flush()?;
 	writer = handle_terminate(terminated, None, writer);
-	// println!("Wrote chunk with {} items", n_items);
+	logger.println(format!("Wrote chunk with {} items", n_items));
 	file_names.clear();
 	file_names.shrink_to(0);
 	file_sources.clear();
