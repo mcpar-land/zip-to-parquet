@@ -151,7 +151,7 @@ impl Logger {
 				}
 				current_bar.finish_and_clear();
 			}
-			Logger::Simple { .. } => todo!(),
+			Logger::Simple { .. } => {}
 		}
 	}
 }
