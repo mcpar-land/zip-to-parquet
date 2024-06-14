@@ -40,9 +40,12 @@ struct Args {
 	/// do not include zip file source column in output
 	#[arg(long)]
 	no_source: bool,
-	// do not include the SHA-256 hash column in output
+	/// do not include the SHA-256 hash column in output
 	#[arg(long)]
 	no_hash: bool,
+	/// simple logging output instead of progress bars
+	#[arg(long)]
+	simple: bool,
 	/// filter files by glob (example: "**/*.png")
 	#[arg(long, short)]
 	glob: Option<String>,
@@ -60,7 +63,7 @@ fn main() {
 fn run() -> Result<(), Error> {
 	let args = Args::parse();
 
-	let mut logger = Logger::new(args.input.len());
+	let mut logger = Logger::new(&args);
 
 	let terminated = Arc::new(AtomicBool::new(false));
 
@@ -216,11 +219,11 @@ fn write_from_stream(
 
 	for i in 0..input.len() {
 		writer = handle_terminate(terminated, Some(logger), writer);
-		logger.inc(1);
 		let file = input.by_index(i).map_err(|err| Error::Zip {
 			err,
 			file: path.clone(),
 		})?;
+		logger.inc(1, &path.to_string_lossy());
 		if file.is_dir() {
 			continue;
 		}

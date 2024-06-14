@@ -1,6 +1,8 @@
 use atty::Stream;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
+use crate::Args;
+
 pub enum Logger {
 	Tty {
 		overall_bar: Option<ProgressBar>,
@@ -14,8 +16,9 @@ pub enum Logger {
 }
 
 impl Logger {
-	pub fn new(n_sources: usize) -> Self {
-		if !atty::is(Stream::Stderr) {
+	pub fn new(args: &Args) -> Self {
+		let n_sources = args.input.len();
+		if args.simple || !atty::is(Stream::Stderr) {
 			return Logger::Simple {
 				overall_progress: if n_sources > 1 {
 					Some((0, n_sources as u64))
@@ -87,7 +90,7 @@ impl Logger {
 		}
 	}
 
-	pub fn inc(&mut self, delta: u64) {
+	pub fn inc(&mut self, delta: u64, current_file: &str) {
 		match self {
 			Logger::Tty { current_bar, .. } => current_bar.inc(delta),
 			Logger::Simple {
@@ -102,7 +105,10 @@ impl Logger {
 				let new_pct = (*current_progress as f64 / *current_max as f64 * 100.0)
 					.floor() as usize;
 				if new_pct > old_pct {
-					eprintln!("{}% ({}/{})", new_pct, *current_progress, *current_max);
+					eprintln!(
+						"{}% ({}/{}) {}",
+						new_pct, *current_progress, *current_max, current_file
+					);
 				}
 			}
 		}
