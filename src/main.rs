@@ -49,9 +49,12 @@ pub struct Args {
 	/// filter files by glob (example: "**/*.png")
 	#[arg(long, short)]
 	glob: Option<String>,
+	/// specify row group size
+	#[arg(long, default_value = "1000")]
+	row_group_size: usize,
 }
 
-const BLOCK_SIZE: usize = 512 * 1024 * 1024;
+const WRITE_CHUNK_SIZE: usize = 100;
 
 fn main() {
 	if let Err(err) = run() {
@@ -101,6 +104,7 @@ fn run() -> Result<(), Error> {
 
 	let props = WriterProperties::builder()
 		.set_compression(Compression::SNAPPY)
+		.set_max_row_group_size(args.row_group_size)
 		.build();
 
 	let schema = RecordBatch::try_from_iter(vec![
@@ -209,7 +213,6 @@ fn write_from_stream(
 	let mut file_sources = Vec::<Option<String>>::new();
 	let mut file_contents = Vec::<Option<Vec<u8>>>::new();
 	let mut file_hashes = Vec::<Option<String>>::new();
-	let mut block_size: usize = 0;
 
 	logger.next_overall(
 		format!("Writing from {}...", path.to_string_lossy()),
@@ -232,7 +235,6 @@ fn write_from_stream(
 			}
 		}
 		let file_name = file.name().to_string();
-		block_size += file_name.as_bytes().len();
 		let (file_body, file_hash) = if args.no_body && args.no_hash {
 			(None, None)
 		} else {
@@ -244,7 +246,6 @@ fn write_from_stream(
 					file_name: file_name.clone(),
 					file: path.clone(),
 				})?;
-			block_size += file_body.len();
 			let hash = if args.no_hash {
 				None
 			} else {
@@ -257,7 +258,6 @@ fn write_from_stream(
 					.collect::<Vec<String>>()
 					.join("");
 				let hash_str = format!("{:x?}", hash);
-				block_size += hash_str.as_bytes().len();
 				Some(hash_str)
 			};
 			let body = if args.no_body { None } else { Some(file_body) };
@@ -268,7 +268,6 @@ fn write_from_stream(
 			None
 		} else {
 			let source = path.to_string_lossy().to_string();
-			block_size += source.as_bytes().len();
 			Some(source)
 		};
 
@@ -278,7 +277,7 @@ fn write_from_stream(
 		file_hashes.push(file_hash);
 
 		// write to parquet file and start a new chunk when it reaches 512 mb
-		if block_size >= BLOCK_SIZE {
+		if file_names.len() >= WRITE_CHUNK_SIZE {
 			writer = write_chunk(
 				writer,
 				&mut file_names,
@@ -288,20 +287,22 @@ fn write_from_stream(
 				terminated,
 				logger,
 			)?;
-			block_size = 0;
 		}
 	}
 
 	// write the last chunk which might be smaller than 512 mb
-	writer = write_chunk(
-		writer,
-		&mut file_names,
-		&mut file_sources,
-		&mut file_contents,
-		&mut file_hashes,
-		terminated,
-		logger,
-	)?;
+	// ...but only if there's still some left over!
+	if file_names.len() > 0 {
+		writer = write_chunk(
+			writer,
+			&mut file_names,
+			&mut file_sources,
+			&mut file_contents,
+			&mut file_hashes,
+			terminated,
+			logger,
+		)?;
+	}
 
 	Ok(writer)
 }
