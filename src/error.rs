@@ -41,6 +41,7 @@ pub enum Error {
 	},
 	NeedsOutputOrStdout,
 	InvalidOutputAndStdout,
+	Other(String),
 }
 
 impl std::error::Error for Error {}
@@ -97,6 +98,7 @@ impl Display for Error {
 			Error::InvalidOutputAndStdout => {
 				write!(f, "must provide an output file or --stdout, but not both")
 			}
+			Error::Other(err) => write!(f, "other error: {}", err),
 		}
 	}
 }
