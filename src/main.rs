@@ -50,11 +50,9 @@ pub struct Args {
 	#[arg(long, short)]
 	glob: Option<String>,
 	/// specify row group size
-	#[arg(long, default_value = "1000")]
+	#[arg(long, default_value = "100")]
 	row_group_size: usize,
 }
-
-const WRITE_CHUNK_SIZE: usize = 100;
 
 fn main() {
 	if let Err(err) = run() {
@@ -276,9 +274,8 @@ fn write_from_stream(
 		file_contents.push(file_body);
 		file_hashes.push(file_hash);
 
-		// write to parquet file and start a new chunk when it reaches 512 mb
-		if file_names.len() >= WRITE_CHUNK_SIZE {
-			writer = write_chunk(
+		if file_names.len() >= args.row_group_size {
+			writer = write_row_group(
 				writer,
 				&mut file_names,
 				&mut file_sources,
@@ -290,10 +287,10 @@ fn write_from_stream(
 		}
 	}
 
-	// write the last chunk which might be smaller than 512 mb
+	// write the last chunk which might be smaller than the row group size
 	// ...but only if there's still some left over!
 	if file_names.len() > 0 {
-		writer = write_chunk(
+		writer = write_row_group(
 			writer,
 			&mut file_names,
 			&mut file_sources,
@@ -307,7 +304,7 @@ fn write_from_stream(
 	Ok(writer)
 }
 
-fn write_chunk(
+fn write_row_group(
 	mut writer: ArrowWriter<FileOrStdout>,
 	file_names: &mut Vec<String>,
 	file_sources: &mut Vec<Option<String>>,
@@ -339,7 +336,7 @@ fn write_chunk(
 	writer = handle_terminate(terminated, None, writer);
 	writer.flush()?;
 	writer = handle_terminate(terminated, None, writer);
-	logger.println(format!("Wrote chunk with {} items", n_items));
+	logger.println(format!("Wrote row group with {} items", n_items));
 	file_names.clear();
 	file_names.shrink_to(0);
 	file_sources.clear();
