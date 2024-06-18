@@ -1,5 +1,4 @@
 use arrow_array::{ArrayRef, BinaryArray, RecordBatch, StringArray};
-use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use parquet::{
 	arrow::ArrowWriter, basic::Compression, file::properties::WriterProperties,
 };
@@ -41,7 +40,7 @@ pub fn run(args: &Args, terminated: Arc<AtomicBool>) -> Result<(), Error> {
 		}
 	}
 
-	let bar = make_progress_bar(total_files);
+	let logger = Logger::new(args, total_files as u64);
 
 	eprintln!("Found {} total zipped files", total_files);
 
@@ -61,10 +60,10 @@ pub fn run(args: &Args, terminated: Arc<AtomicBool>) -> Result<(), Error> {
 				let args = args.clone();
 				let terminated = terminated.clone();
 				let tx = tx.clone();
-				let bar = bar.clone();
+				let logger = logger.clone();
 				pool.execute(move || {
 					if let Err(err) =
-						handle_read_zip(entry, args, terminated.clone(), tx, bar)
+						handle_read_zip(entry, args, terminated.clone(), tx, logger)
 					{
 						eprintln!("Error in zip reading thread: {}", err);
 						terminated.store(true, Ordering::Relaxed);
@@ -88,7 +87,7 @@ pub fn run(args: &Args, terminated: Arc<AtomicBool>) -> Result<(), Error> {
 		file_sources.push(input.source);
 		file_contents.push(input.body);
 		file_hashes.push(input.hash);
-		bar.inc(1);
+		logger.inc(1);
 
 		if file_names.len() >= args.row_group_size {
 			writer = write_row_group(
@@ -98,7 +97,6 @@ pub fn run(args: &Args, terminated: Arc<AtomicBool>) -> Result<(), Error> {
 				&mut file_contents,
 				&mut file_hashes,
 				&terminated,
-				bar.clone(),
 			)?;
 		}
 	}
@@ -112,7 +110,6 @@ pub fn run(args: &Args, terminated: Arc<AtomicBool>) -> Result<(), Error> {
 			&mut file_contents,
 			&mut file_hashes,
 			&terminated,
-			bar.clone(),
 		)?;
 	}
 
@@ -128,7 +125,6 @@ fn write_row_group(
 	file_contents: &mut Vec<Option<Vec<u8>>>,
 	file_hashes: &mut Vec<Option<String>>,
 	terminated: &Arc<AtomicBool>,
-	bar: ProgressBar,
 ) -> Result<ArrowWriter<FileOrStdout>, Error> {
 	// let n_items = file_names.len();
 	let file_names_column =
@@ -151,18 +147,10 @@ fn write_row_group(
 	])?;
 	writer.write(&batch)?;
 	writer = handle_terminate(terminated, None, writer);
-	// hgmm maybe we can disable this?
-	// writer.flush()?;
-	// writer = handle_terminate(terminated, None, writer);
-	// logger.println(format!("Wrote row group with {} items", n_items));
 	file_names.clear();
-	// file_names.shrink_to(0);
 	file_sources.clear();
-	// file_sources.shrink_to(0);
 	file_contents.clear();
-	// file_contents.shrink_to(0);
 	file_hashes.clear();
-	// file_hashes.shrink_to(0);
 	Ok(writer)
 }
 pub struct UnzippedFile {
@@ -177,7 +165,7 @@ fn handle_read_zip(
 	args: Args,
 	terminated: Arc<AtomicBool>,
 	tx: SyncSender<UnzippedFile>,
-	bar: ProgressBar,
+	logger: Logger,
 ) -> Result<(), Error> {
 	let glob = args.glob.as_ref().map(|glob| Glob::new(&glob).unwrap());
 	let mut input = open_zip(&path)?;
@@ -237,7 +225,7 @@ fn handle_read_zip(
 			.map_err(|err| Error::Other(format!("{}", err)))?;
 		}
 	}
-	bar.println(format!("Finished reading {}", path.to_string_lossy()));
+	logger.println(format!("Finished reading {}", path.to_string_lossy()));
 	Ok(())
 }
 
@@ -301,19 +289,6 @@ fn open_zip(path: &PathBuf) -> Result<ZipArchive<BufReader<File>>, Error> {
 		file: path.clone(),
 	})?;
 	Ok(input)
-}
-
-fn make_progress_bar(n_items: usize) -> ProgressBar {
-	let progress_chars = "█▉▊▋▌▍▎▏  ";
-	// let progress_chars = "█▓▒░  ";
-
-	let current_bar = ProgressBar::new(n_items as u64);
-	current_bar.set_draw_target(ProgressDrawTarget::stdout());
-	current_bar.set_style(ProgressStyle::with_template(
-			"{spinner:.green} [{elapsed_precise}] [{wide_bar}] {pos}/{len} ({per_sec})"
-		).unwrap().progress_chars(progress_chars));
-
-	current_bar
 }
 
 fn handle_terminate(
